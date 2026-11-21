@@ -33,13 +33,13 @@
 ## Быстрый старт
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/<username>/3x-ui-stealth/main/setup-3xui.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/porutchik/3x-ui-stealth/main/setup-3xui.sh)
 ```
 
 или через пайп (вопросы читаются с `/dev/tty`, так что и так работает):
 
 ```bash
-curl -Ls https://raw.githubusercontent.com/<username>/3x-ui-stealth/main/setup-3xui.sh | bash
+curl -Ls https://raw.githubusercontent.com/porutchik/3x-ui-stealth/main/setup-3xui.sh | bash
 ```
 
 Скрипт спросит:
