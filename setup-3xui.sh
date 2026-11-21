@@ -102,12 +102,13 @@ resolve4() { getent ahostsv4 "$1" 2>/dev/null | awk '{print $1; exit}'; }
 # IP под hostname/доменом, из-за чего getent ложно резолвит домен в него вместо
 # настоящей DNS-записи (nginx тогда вешается не на тот IP, certbot не проходит).
 clean_hosts_binding() {
-    local name=$1 esc
+    local name=$1 esc bak
     esc=${name//./\\.}
     if grep -qE "[[:space:]]${esc}([[:space:]]|\$)" /etc/hosts 2>/dev/null; then
-        [ -f /etc/hosts.bak.3xui ] || cp -a /etc/hosts /etc/hosts.bak.3xui
+        bak="/etc/hosts.bak.3xui.$(date +%Y%m%d-%H%M%S).$$"
+        cp -a /etc/hosts "$bak"
         sed -i -E "/[[:space:]]${esc}([[:space:]]|\$)/d" /etc/hosts
-        info "Из /etc/hosts удалена связка с '$name' — домен резолвится по DNS (бэкап: /etc/hosts.bak.3xui)"
+        info "Из /etc/hosts удалена связка с '$name' — домен резолвится по DNS (бэкап: $bak)"
     fi
 }
 
@@ -177,10 +178,10 @@ info "Основной IP: $PRIMARY_IP${SECONDARY_IPS:+; вторичный(е):
 #-------------------------------------------------------------------------------
 
 # если hostname сервера уже резолвится в один из его IP — предложить его
+# (/etc/hosts здесь НЕ трогаем: домен ещё не выбран — почистим после выбора)
 HN=$(hostname -f 2>/dev/null || true)
 DEFAULT_DOMAIN=""
 if [ -n "$HN" ]; then
-    clean_hosts_binding "$HN"
     HIP=$(resolve4 "$HN")
     if [ -n "$HIP" ] && is_server_ip "$HIP"; then
         DEFAULT_DOMAIN="$HN"
