@@ -98,6 +98,19 @@ confirm() { # confirm "Вопрос" → 0 если y/да, иначе 1 (деф
 
 resolve4() { getent ahostsv4 "$1" 2>/dev/null | awk '{print $1; exit}'; }
 
+# Убрать из /etc/hosts связку имя→IP: образы VPS часто прописывают там основной
+# IP под hostname/доменом, из-за чего getent ложно резолвит домен в него вместо
+# настоящей DNS-записи (nginx тогда вешается не на тот IP, certbot не проходит).
+clean_hosts_binding() {
+    local name=$1 esc
+    esc=${name//./\\.}
+    if grep -qE "[[:space:]]${esc}([[:space:]]|\$)" /etc/hosts 2>/dev/null; then
+        [ -f /etc/hosts.bak.3xui ] || cp -a /etc/hosts /etc/hosts.bak.3xui
+        sed -i -E "/[[:space:]]${esc}([[:space:]]|\$)/d" /etc/hosts
+        info "Из /etc/hosts удалена связка с '$name' — домен резолвится по DNS (бэкап: /etc/hosts.bak.3xui)"
+    fi
+}
+
 is_server_ip() {
     local ip=$1 x
     for x in $SERVER_IPS; do [ "$x" = "$ip" ] && return 0; done
@@ -167,6 +180,7 @@ info "Основной IP: $PRIMARY_IP${SECONDARY_IPS:+; вторичный(е):
 HN=$(hostname -f 2>/dev/null || true)
 DEFAULT_DOMAIN=""
 if [ -n "$HN" ]; then
+    clean_hosts_binding "$HN"
     HIP=$(resolve4 "$HN")
     if [ -n "$HIP" ] && is_server_ip "$HIP"; then
         DEFAULT_DOMAIN="$HN"
@@ -185,6 +199,7 @@ while :; do
     if [[ ! "$DOMAIN" =~ ^([A-Za-z0-9](-*[A-Za-z0-9])*\.)+[A-Za-z]{2,}$ ]]; then
         warn "'$DOMAIN' не похоже на домен"
     else
+        clean_hosts_binding "$DOMAIN"
         DOMAIN_IP=$(resolve4 "$DOMAIN")
         if [ -z "$DOMAIN_IP" ]; then
             warn "домен '$DOMAIN' не резолвится"
