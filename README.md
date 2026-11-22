@@ -24,6 +24,11 @@
 - сервер подписок 3x-ui (порт 2096) отключается;
 - HSTS не включается нигде: ни в nginx, ни в панели (`XUI_SKIP_HSTS=1` + `proxy_hide_header`);
 - автопродление сертификата штатным `certbot.timer` + deploy-хук с reload nginx;
+- опциональная блокировка торрентов (по умолчанию — **да**, флаг `-w` чтобы пропустить):
+  iptables-правила против DHT/трекеров/Zona (`get_peers`, `find_node`, `/announce`,
+  `rutracker.cx` и т.п.), портов 6881/51500 и SMTP 25, плюс подсети публичных
+  трекеров; правила IPv4, живут в цепочках `setup3xui_torr_in/out`,
+  автозагрузка через `netfilter-persistent` (SSH/80/443 не затрагиваются);
 - hostname и домен проверяются только по внешнему DNS (`dig @1.1.1.1`/`8.8.8.8`), минуя
   `/etc/hosts` — локальная связка не может подсунуть основной IP вместо A-записи;
 - если hostname сервера уже резолвится в его IP — предлагается как домен по умолчанию;
@@ -68,6 +73,7 @@ setup-3xui.sh -d example.com -c myclient -y
 | `-d DOMAIN` | домен (обязателен в неинтерактивном режиме) |
 | `-c NAME`   | имя клиента/подключения (по умолчанию `main`) |
 | `-y`        | не задавать вопросов (продолжать с основным IP и т.п.) |
+| `-w`        | не устанавливать блокировку торрентов |
 
 ## Что получается в итоге
 
@@ -97,14 +103,14 @@ Happ — или отсканировать QR с экрана терминала
                 │   сертификат LE, h2    │   HSTS не включён
                 └──┬──────────┬────────┬─┘
                    │          │        │
-       /           │   /webPath/    /<ws-путь>
-   сайт-заглушка   │          │        │
-   (html5up Aerial)│          │        \ if ($http_upgrade != "websocket") { return 404; }
-                   │          │          \
-          301 → https   ┌─────▼──────┐ ┌──▼──────────────┐
-                        │   3x-ui    │ │ xray (VLESS+WS) │
-                        │ 127.0.0.1  │ │  127.0.0.1      │
-                        └────────────┘ └─────────────────┘
+        /           │   /webPath/  │   /<ws-путь>
+   сайт-заглушка   │              │        │
+   (html5up Aerial)│              │        │ if ($http_upgrade != "websocket") { return 404; }
+                   │              │        │
+          301 → https   ┌────────▼───┐ ┌──▼──────────────┐
+                       │   3x-ui    │ │  xray (VLESS+WS) │
+                       │ 127.0.0.1  │ │   127.0.0.1      │
+                       └────────────┘ └─────────────────┘
 ```
 
 - наружу открыт один порт 443 (и 80 для ACME/редиректа); всё остальное — localhost;
@@ -141,6 +147,14 @@ certbot delete --cert-name example.com   # если домен больше не
 
 При смене A-записи на другой IP сервера: поправьте `listen` в
 `/etc/nginx/conf.d/selfsteal.conf`, затем `systemctl reload nginx && certbot renew --force-renewal`.
+
+Убрать блокировку торрентов (если ставилась):
+
+```bash
+iptables -D INPUT  -j setup3xui_torr_in  && iptables -F setup3xui_torr_in  && iptables -X setup3xui_torr_in
+iptables -D OUTPUT -j setup3xui_torr_out && iptables -F setup3xui_torr_out && iptables -X setup3xui_torr_out
+netfilter-persistent save
+```
 
 ## Заметки
 

@@ -19,7 +19,8 @@
 #   curl -Ls https://raw.githubusercontent.com/porutchik/3x-ui-stealth/main/setup-3xui.sh | bash
 #
 # Неинтерактивно (для автоматизации):
-#   setup-3xui.sh -d example.com [-c имя-клиента] [-y]
+#   setup-3xui.sh -d example.com [-c имя-клиента] [-y] [-w]
+#     -w — не устанавливать блокировку торрентов (по умолчанию она ставится)
 #
 # Повторный запуск на уже установленной 3x-ui панели запрещён
 # (сначала: x-ui uninstall).
@@ -32,7 +33,7 @@ SELFSTEAL_DIR="/var/www/selfsteal"
 NGINX_CONF="/etc/nginx/conf.d/selfsteal.conf"
 ACCESS_FILE="/root/3x-ui-access.txt"
 
-DOMAIN="" CLIENT_NAME="main" ASSUME_YES=0
+DOMAIN="" CLIENT_NAME="main" ASSUME_YES=0 DO_FIREWALL=1
 PANEL_USER="" PANEL_PASS="" PANEL_PORT="" WEB_PATH="" API_TOKEN=""
 INBOUND_PORT="" WS_PATH="" UUID=""
 DOMAIN_IP="" PRIMARY_IP="" SECONDARY_IPS=""
@@ -96,6 +97,12 @@ confirm() { # confirm "Вопрос" → 0 если y/да, иначе 1 (деф
     [[ "${ans,,}" == y || "${ans,,}" == "да" ]]
 }
 
+confirm_yes() { # confirm_yes "Вопрос" → 0 если пусто/y/да (дефолт — да)
+    local ans=""
+    tty_read -r -p "$1 [Y/n]: " ans || ans=y
+    [[ -z "${ans,,}" || "${ans,,}" == y || "${ans,,}" == "да" ]]
+}
+
 resolve4() { # резолв ТОЛЬКО по внешнему DNS (dig), минуя /etc/hosts и локальный стаб:
     local d=$1 a="" ns #  # локальная связка в hosts не должна подменять A-запись
     if command -v dig >/dev/null 2>&1; then
@@ -145,7 +152,11 @@ wait_url() { # ждать HTTP 200; $2 — таймаут в секундах, $
 
 usage() {
     sed -n '2,30p' "$0" 2>/dev/null || true
-    echo "Использование: setup-3xui.sh [-d домен] [-c имя-клиента] [-y]"
+    echo "Использование: setup-3xui.sh [-d домен] [-c имя-клиента] [-y] [-w]"
+    echo "  -d домен        подставной домен (A-запись → IP сервера)"
+    echo "  -c имя          имя клиента/подключения (по умолчанию main)"
+    echo "  -y              не задавать вопросов"
+    echo "  -w              не устанавливать блокировку торрентов"
     exit 1
 }
 
@@ -153,11 +164,12 @@ usage() {
 # Аргументы и проверки окружения
 #-------------------------------------------------------------------------------
 
-while getopts ":d:c:y" o; do
+while getopts ":d:c:yw" o; do
     case "$o" in
         d) DOMAIN=$OPTARG ;;
         c) CLIENT_NAME=$OPTARG ;;
         y) ASSUME_YES=1 ;;
+        w) DO_FIREWALL=0 ;;
         *) usage ;;
     esac
 done
@@ -525,6 +537,81 @@ systemctl restart nginx
 systemctl is-active --quiet nginx || die "nginx не перезапустился с финальным конфигом"
 
 #-------------------------------------------------------------------------------
+# Файрвол: блокировка торрентов (опционально; правила IPv4, только точечные DROP,
+# SSH/80/443/панель не затрагиваются). Персистентность — netfilter-persistent.
+#-------------------------------------------------------------------------------
+
+TORR_FW_STATUS="не установлена (флаг -w)"
+if [ "$DO_FIREWALL" = 1 ]; then
+    if [ "$ASSUME_YES" != 1 ]; then
+        confirm_yes "Установить блокировку торрентов (iptables + автозагрузка)" || DO_FIREWALL=0
+    fi
+fi
+if [ "$DO_FIREWALL" = 1 ]; then
+    log "Файрвол: блокировка торрентов (DHT, трекеры, Zona, порты 6881/51500, SMTP 25)"
+    CH_IN=setup3xui_torr_in
+    CH_OUT=setup3xui_torr_out
+    iptables -N "$CH_IN" 2>/dev/null || true
+    iptables -N "$CH_OUT" 2>/dev/null || true
+    iptables -F "$CH_IN"
+    iptables -F "$CH_OUT"
+    # INPUT
+    iptables -A "$CH_IN" -s 85.217.140.0/24 -j DROP
+    iptables -A "$CH_IN" -s 85.217.149.0/24 -j DROP
+    iptables -A "$CH_IN" -p udp -m udp --sport 6881 -j DROP
+    iptables -A "$CH_IN" -p udp -m string --string get_peers --algo kmp -j DROP
+    iptables -A "$CH_IN" -p udp -m string --string find_node --algo kmp -j DROP
+    # OUTPUT (строки с пробелами обязаны быть в кавычках: --string "GET /ann?")
+    iptables -A "$CH_OUT" -m string --string "GET /ann?" --algo kmp -j DROP
+    iptables -A "$CH_OUT" -m string --string "GET /announce?" --algo kmp -j DROP
+    iptables -A "$CH_OUT" -m string --string "t: Zona" --algo kmp -j DROP
+    iptables -A "$CH_OUT" -m string --string .opentrackr. --algo kmp -j DROP
+    iptables -A "$CH_OUT" -p udp -m string --string /announce --algo kmp -j DROP
+    iptables -A "$CH_OUT" -m string --string rutracker.cx --algo kmp -j DROP
+    iptables -A "$CH_OUT" -m string --string .t-ru.org --algo kmp -j DROP
+    iptables -A "$CH_OUT" -m string --string .openbittorrent. --algo kmp -j DROP
+    iptables -A "$CH_OUT" -m string --string tr.kxmp.cf --algo kmp -j DROP
+    iptables -A "$CH_OUT" -m string --string .abcvg. --algo kmp -j DROP
+    iptables -A "$CH_OUT" -p udp -m udp --dport 6881 -j DROP
+    iptables -A "$CH_OUT" -p udp -m string --string get_peers --algo kmp -j DROP
+    iptables -A "$CH_OUT" -p udp -m string --string find_node --algo kmp -j DROP
+    iptables -A "$CH_OUT" -m string --string .opentrackr. --algo kmp -j DROP # дубль из исходного списка, сохранён
+    iptables -A "$CH_OUT" -p tcp -m tcp --dport 25 -j DROP
+    iptables -A "$CH_OUT" -d 185.107.94.0/24 -j DROP
+    iptables -A "$CH_OUT" -d 77.68.37.246/32 -j DROP
+    iptables -A "$CH_OUT" -d 77.68.41.0/24 -j DROP
+    iptables -A "$CH_OUT" -d 88.208.201.96/32 -j DROP
+    iptables -A "$CH_OUT" -d 88.208.208.22/32 -j DROP
+    iptables -A "$CH_OUT" -d 88.208.208.25/32 -j DROP
+    iptables -A "$CH_OUT" -d 88.208.218.105/32 -j DROP
+    iptables -A "$CH_OUT" -d 88.208.218.118/32 -j DROP
+    iptables -A "$CH_OUT" -d 88.208.218.99/32 -j DROP
+    iptables -A "$CH_OUT" -d 88.208.228.110/32 -j DROP
+    iptables -A "$CH_OUT" -d 88.208.228.143/32 -j DROP
+    iptables -A "$CH_OUT" -d 88.208.228.157/32 -j DROP
+    iptables -A "$CH_OUT" -d 88.208.229.138/32 -j DROP
+    iptables -A "$CH_OUT" -d 45.153.34.149/32 -j DROP
+    iptables -A "$CH_OUT" -d 45.153.34.235/32 -j DROP
+    iptables -A "$CH_OUT" -d 91.92.40.200/32 -j DROP
+    iptables -A "$CH_OUT" -d 91.92.40.202/32 -j DROP
+    iptables -A "$CH_OUT" -d 104.156.155.0/24 -j DROP
+    iptables -A "$CH_OUT" -p tcp -m tcp --dport 51500 -j DROP
+    # подключаем цепочки в самое начало INPUT/OUTPUT
+    iptables -C INPUT -j "$CH_IN" 2>/dev/null || iptables -I INPUT 1 -j "$CH_IN"
+    iptables -C OUTPUT -j "$CH_OUT" 2>/dev/null || iptables -I OUTPUT 1 -j "$CH_OUT"
+    # автозагрузка после ребута
+    echo 'iptables-persistent iptables-persistent/autosave_v4 boolean false' | debconf-set-selections
+    echo 'iptables-persistent iptables-persistent/autosave_v6 boolean false' | debconf-set-selections
+    apt-get $APT_OPTS install -y -qq iptables-persistent >/root/setup-iptables.log 2>&1 \
+        || { tail -n 10 /root/setup-iptables.log >&2; die "не удалось установить iptables-persistent (лог: /root/setup-iptables.log)"; }
+    netfilter-persistent save >/dev/null 2>&1 \
+        || warn "правила применены, но netfilter-persistent save не удался — после ребута их не будет"
+    TORR_FW_STATUS="установлена (IPv4, автозагрузка: netfilter-persistent)"
+else
+    info "Блокировка торрентов пропущена (-w)"
+fi
+
+#-------------------------------------------------------------------------------
 # Самопроверка
 #-------------------------------------------------------------------------------
 
@@ -574,6 +661,7 @@ PANEL_URL="https://${DOMAIN}${WEB_PATH}"
     echo "Файлы: nginx: $NGINX_CONF; БД панели: /etc/x-ui/x-ui.db (бэкап!)"
     echo "Сертификат: /etc/letsencrypt/live/$DOMAIN/ (продление: certbot renew"
     echo "             по таймеру certbot.timer, хук перезагружает nginx)"
+    echo "Блокировка торрентов: $TORR_FW_STATUS"
     echo "==================================================================="
 } | tee "$ACCESS_FILE" >/dev/null
 chmod 600 "$ACCESS_FILE"
@@ -604,4 +692,5 @@ fi
 echo -e " Доступы сохранены в ${C_Y}${ACCESS_FILE}${C_N} (chmod 600)."
 echo -e " HSTS выключен (nginx: не включён, 3x-ui: XUI_SKIP_HSTS=1), сервер подписок отключен,"
 echo -e " панель и xray слушают только 127.0.0.1, наружу — один порт 443 с заглушкой."
+echo -e " Блокировка торрентов: $TORR_FW_STATUS."
 echo
