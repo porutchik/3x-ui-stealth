@@ -37,7 +37,7 @@ SELFSTEAL_DIR="/var/www/selfsteal"
 NGINX_CONF="/etc/nginx/conf.d/selfsteal.conf"
 ACCESS_FILE="/root/3x-ui-access.txt"
 
-DOMAIN="" CLIENT_NAME="main" ASSUME_YES=0 DO_FIREWALL=1 TRANSPORT="xhttp"
+DOMAIN="" CLIENT_NAME="" ASSUME_YES=0 DO_FIREWALL=1 TRANSPORT="xhttp"
 XFF_MARKER_VAL="" # значение секретного заголовка X-Real-Source (маркер доверия X-Forwarded-For)
 PANEL_USER="" PANEL_PASS="" PANEL_PORT="" WEB_PATH="" API_TOKEN=""
 INBOUND_PORT="" WS_PATH="" UUID=""
@@ -72,6 +72,15 @@ rnd_free_port() {
         p=$(( (RANDOM % 55000) + 10000 ))
         ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":${p}$" || { echo "$p"; return 0; }
     done
+}
+
+# случайные строчные буквы заданной длины (для имени клиента)
+rnd_lower() {
+    local out="" n=$1
+    while [ "${#out}" -lt "$n" ]; do
+        out+="$(head -c 512 /dev/urandom | LC_ALL=C tr -dc 'a-z' || true)"
+    done
+    printf '%.*s' "$n" "$out"
 }
 
 # read с /dev/tty: при `curl ... | bash` stdin занят самим скриптом
@@ -159,7 +168,7 @@ usage() {
     sed -n '2,30p' "$0" 2>/dev/null || true
     echo "Использование: setup-3xui.sh [-d домен] [-c имя-клиента] [-y] [-w] [-t ws|xhttp]"
     echo "  -d домен        подставной домен (A-запись → IP сервера)"
-    echo "  -c имя          имя клиента/подключения (по умолчанию main)"
+    echo "  -c имя          имя клиента/подключения (по умолчанию: <код страны><6 букв>, напр. NLqwfxz)"
     echo "  -y              не задавать вопросов"
     echo "  -w              не устанавливать блокировку торрентов"
     echo "  -t транспорт    xhttp (по умолчанию) или ws (легаси)"
@@ -441,6 +450,15 @@ WS_PATH="/$(rnd 10)"
 UUID=$(cat /proc/sys/kernel/random/uuid)
 XFF_MARKER_VAL=$(rnd 24)
 
+# имя клиента по умолчанию: код страны сервера (ipinfo.io) + 6 случайных букв,
+# например NLqwfxz — удобно, когда узлов несколько
+if [ -z "$CLIENT_NAME" ]; then
+    CC=$(curl -fs --max-time 10 https://ipinfo.io/country 2>/dev/null | tr -d '[:space:]' || true)
+    [[ "$CC" =~ ^[A-Z]{2}$ ]] || CC="XX"
+    CLIENT_NAME="${CC}$(rnd_lower 6)"
+    info "Имя клиента по умолчанию: $CLIENT_NAME (геолокация сервера: $CC)"
+fi
+
 log "Создание подключения VLESS+$TRANSPORT через API: 127.0.0.1:$INBOUND_PORT, путь $WS_PATH, клиент '$CLIENT_NAME'"
 # subId нужен панели для генерации ссылок/QR клиента (без него — «у этого клиента нет subId»)
 VLESS_SETTINGS=$(jq -nc --arg id "$UUID" --arg email "$CLIENT_NAME" --arg sub "$(rnd 16)" \
@@ -474,7 +492,8 @@ INBOUND_ID=$(echo "$ADD_RES" | jq -r '.obj.id')
 # голый инбаунд (порт xray, security=none, без sni) — см. «Хосты» в руководстве
 log "Добавление Хоста для инбауна: $DOMAIN:443, TLS, SNI, fingerprint chrome"
 HOST_PAYLOAD=$(jq -nc --arg d "$DOMAIN" --argjson iid "$INBOUND_ID" \
-    '{remark:"main", inboundIds:[$iid], hosts:[$d+":443"], security:"tls", sni:$d, fingerprint:"chrome"}')
+    '{remark:$name, inboundIds:[$iid], hosts:[$d+":443"], security:"tls", sni:$d, fingerprint:"chrome"}' \
+    --arg name "$CLIENT_NAME")
 HOST_RES=$(panel_curl -X POST -H 'Content-Type: application/json' --data-binary "$HOST_PAYLOAD" \
     "$API_BASE/panel/api/hosts/add") || die "API: не удалось добавить Хост"
 echo "$HOST_RES" | jq -e '.success == true' >/dev/null || die "API Хоста вернул ошибку: $HOST_RES"
