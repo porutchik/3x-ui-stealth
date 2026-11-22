@@ -315,7 +315,7 @@ panel_curl() { curl -sf -H "Host: $DOMAIN" -H "Authorization: Bearer $API_TOKEN"
 log "Настройки панели через API: отключаю сервер подписок (порт 2096), задаю домен"
 SETTINGS_FORM=$(panel_curl -X POST "$API_BASE/panel/api/setting/all" \
     | jq -r --arg dom "$DOMAIN" \
-        '.obj | .subEnable=false | .webDomain=$dom
+        '.obj | .subEnable=false | .webDomain=$dom | .remarkTemplate="{{EMAIL}}"
          | to_entries | map("\(.key)=\(.value|tostring|@uri)") | join("&")') \
     || die "API: не удалось прочитать настройки панели"
 panel_curl -X POST --data-binary "$SETTINGS_FORM" "$API_BASE/panel/api/setting/update" >/dev/null \
@@ -382,10 +382,12 @@ WS_PATH="/$(rnd 10)"
 UUID=$(cat /proc/sys/kernel/random/uuid)
 
 log "Создание подключения VLESS+WS через API: 127.0.0.1:$INBOUND_PORT, путь $WS_PATH, клиент '$CLIENT_NAME'"
-VLESS_SETTINGS=$(jq -nc --arg id "$UUID" --arg email "$CLIENT_NAME" \
-    '{clients:[{id:$id, flow:"", email:$email, enable:true}], decryption:"none"}')
-VLESS_STREAM=$(jq -nc --arg p "$WS_PATH" \
-    '{network:"ws", security:"none", wsSettings:{path:$p, headers:{}}}')
+# subId нужен панели для генерации ссылок/QR клиента (без него — «у этого клиента нет subId»)
+VLESS_SETTINGS=$(jq -nc --arg id "$UUID" --arg email "$CLIENT_NAME" --arg sub "$(rnd 16)" \
+    '{clients:[{id:$id, flow:"", email:$email, subId:$sub, enable:true}], decryption:"none"}')
+# headers.Host попадает в генерируемую панелью ссылку (host=домен)
+VLESS_STREAM=$(jq -nc --arg p "$WS_PATH" --arg dom "$DOMAIN" \
+    '{network:"ws", security:"none", wsSettings:{path:$p, headers:{Host:$dom}}}')
 VLESS_SNIFF=$(jq -nc '{enabled:true, destOverride:["http","tls"]}')
 
 ADD_RES=$(panel_curl -X POST \
@@ -396,8 +398,25 @@ ADD_RES=$(panel_curl -X POST \
     --data-urlencode "sniffing=$VLESS_SNIFF" \
     "$API_BASE/panel/api/inbounds/add") || die "API: не удалось создать инбаунд"
 echo "$ADD_RES" | jq -e '.success == true' >/dev/null || die "API вернул ошибку: $ADD_RES"
+INBOUND_ID=$(echo "$ADD_RES" | jq -r '.obj.id')
+[ -n "$INBOUND_ID" ] && [ "$INBOUND_ID" != "null" ] || die "API не вернул id инбауна: $ADD_RES"
+
+# Хост (внешний адрес подключения): без него панель генерирует ссылки на
+# голый инбаунд (порт xray, security=none, без sni) — см. «Хосты» в руководстве
+log "Добавление Хоста для инбауна: $DOMAIN:443, TLS, SNI, fingerprint chrome"
+HOST_PAYLOAD=$(jq -nc --arg d "$DOMAIN" --argjson iid "$INBOUND_ID" \
+    '{remark:"main", inboundIds:[$iid], hosts:[$d+":443"], security:"tls", sni:$d, fingerprint:"chrome"}')
+HOST_RES=$(panel_curl -X POST -H 'Content-Type: application/json' --data-binary "$HOST_PAYLOAD" \
+    "$API_BASE/panel/api/hosts/add") || die "API: не удалось добавить Хост"
+echo "$HOST_RES" | jq -e '.success == true' >/dev/null || die "API Хоста вернул ошибку: $HOST_RES"
+
 sleep 2
 ss -tln | grep -q "127\.0\.0\.1:${INBOUND_PORT}" || warn "xray не слушает 127.0.0.1:$INBOUND_PORT — проверьте инбаунд в панели"
+
+# панель должна генерировать ссылку с TLS/SNI домена (а не голый инбаунд)
+GEN_LINK=$(panel_curl "$API_BASE/panel/api/inbounds/allLinks" | jq -r '.obj[0] // empty')
+[ -n "$GEN_LINK" ] && echo "$GEN_LINK" | grep -q "sni=${DOMAIN}" \
+    || warn "панель генерирует ссылку без TLS-хоста — проверьте раздел «Хосты» в панели"
 
 #-------------------------------------------------------------------------------
 # nginx: финальный конфиг — TLS, заглушка, панель и VLESS на одном порту 443
