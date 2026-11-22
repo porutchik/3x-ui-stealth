@@ -16,7 +16,11 @@
   `unattended-upgrade-shutdown`, лок не держащий, игнорируется);
 - 3x-ui ставится неинтерактивно: случайные логин/пароль/порт/секретный webPath;
 - панель привязана к `127.0.0.1`, наружу доступна только через nginx по webPath;
-- VLESS+WS создаётся через API 3x-ui, TLS терминирует nginx сертификатом Let's Encrypt;
+- транспорт VLESS на выбор: **xhttp** (по умолчанию, актуальный — без deprecation-предупреждений
+  xray) или `ws` (легаси, флаг `-t ws`); TLS терминирует nginx сертификатом Let's Encrypt;
+- реальные IP клиентов видны панели: nginx передаёт `X-Forwarded-For` вместе с секретным
+  маркером `X-Real-Source`, а xray доверяет ему через `sockopt.trustedXForwardedFor`
+  (работает для IP-лимитов; клиент подделать маркер не может — nginx его перезаписывает);
 - в инбаунд добавляется **Хост** (домен:443, TLS, SNI, fingerprint) и клиенту назначается
   `subId` — панель генерирует правильные ссылки `vless://` и QR без ошибок;
 - сайт-заглушка (шаблон Aerial с html5up) для всех, кто пришёл не по секретным путям;
@@ -74,6 +78,7 @@ setup-3xui.sh -d example.com -c myclient -y
 | `-c NAME`   | имя клиента/подключения (по умолчанию `main`) |
 | `-y`        | не задавать вопросов (продолжать с основным IP и т.п.) |
 | `-w`        | не устанавливать блокировку торрентов |
+| `-t TRANSP` | транспорт VLESS: `xhttp` (по умолчанию) или `ws` |
 
 ## Что получается в итоге
 
@@ -84,7 +89,7 @@ setup-3xui.sh -d example.com -c myclient -y
    пароль:  PLixLxqB9Kl8DZkp
 
  Подключение VLESS (main):
-   vless://<uuid>@example.com:443?encryption=none&security=tls&sni=example.com&fp=chrome&type=ws&host=example.com&path=%2F<путь>#main
+   vless://<uuid>@example.com:443?encryption=none&security=tls&sni=example.com&fp=chrome&type=xhttp&mode=auto&host=example.com&path=%2F<путь>#main
 
  QR-код подключения (наведите камеру приложения-клиента):
  ████▄▄▄▄▄▄▄█ …
@@ -103,14 +108,14 @@ Happ — или отсканировать QR с экрана терминала
                 │   сертификат LE, h2    │   HSTS не включён
                 └──┬──────────┬────────┬─┘
                    │          │        │
-        /           │   /webPath/  │   /<ws-путь>
+        /           │   /webPath/  │   /<путь>/{<сессия>/<seq> — для xhttp}
    сайт-заглушка   │              │        │
-   (html5up Aerial)│              │        │ if ($http_upgrade != "websocket") { return 404; }
-                   │              │        │
-          301 → https   ┌────────▼───┐ ┌──▼──────────────┐
-                       │   3x-ui    │ │  xray (VLESS+WS) │
-                       │ 127.0.0.1  │ │   127.0.0.1      │
-                       └────────────┘ └─────────────────┘
+   (html5up Aerial)│              │        │ ws: только upgrade-запросы, остальным 404
+                   │              │        │ xhttp: buffering off в обе стороны
+          301 → https   ┌────────▼───┐ ┌──▼────────────────────┐
+                       │   3x-ui    │ │  xray (VLESS+xhttp/ws) │
+                       │ 127.0.0.1  │ │   127.0.0.1            │
+                       └────────────┘ └───────────────────────┘
 ```
 
 - наружу открыт один порт 443 (и 80 для ACME/редиректа); всё остальное — localhost;

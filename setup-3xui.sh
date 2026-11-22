@@ -19,13 +19,17 @@
 #   curl -Ls https://raw.githubusercontent.com/porutchik/3x-ui-stealth/main/setup-3xui.sh | bash
 #
 # Неинтерактивно (для автоматизации):
-#   setup-3xui.sh -d example.com [-c имя-клиента] [-y] [-w]
+#   setup-3xui.sh -d example.com [-c имя-клиента] [-y] [-w] [-t ws|xhttp]
 #     -w — не устанавливать блокировку торрентов (по умолчанию она ставится)
+#     -t — транспорт VLESS: xhttp (по умолчанию) или ws (легаси, deprecated в xray)
 #
 # Повторный запуск на уже установленной 3x-ui панели запрещён
 # (сначала: x-ui uninstall).
 #===============================================================================
 set -Eeuo pipefail
+# ssh протаскивает LANG/LC_* клиента — на свежем сервере нужных локалей нет и
+# perl/debconf сыплют предупреждениями; C.UTF-8 выводит кириллицу без проблем
+export LANG=C.UTF-8 LC_ALL=C.UTF-8
 
 XUI_INSTALL_URL="https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh"
 DECOY_TEMPLATE_URL="https://html5up.net/aerial/download"
@@ -33,7 +37,8 @@ SELFSTEAL_DIR="/var/www/selfsteal"
 NGINX_CONF="/etc/nginx/conf.d/selfsteal.conf"
 ACCESS_FILE="/root/3x-ui-access.txt"
 
-DOMAIN="" CLIENT_NAME="main" ASSUME_YES=0 DO_FIREWALL=1
+DOMAIN="" CLIENT_NAME="main" ASSUME_YES=0 DO_FIREWALL=1 TRANSPORT="xhttp"
+XFF_MARKER_VAL="" # значение секретного заголовка X-Real-Source (маркер доверия X-Forwarded-For)
 PANEL_USER="" PANEL_PASS="" PANEL_PORT="" WEB_PATH="" API_TOKEN=""
 INBOUND_PORT="" WS_PATH="" UUID=""
 DOMAIN_IP="" PRIMARY_IP="" SECONDARY_IPS=""
@@ -152,11 +157,12 @@ wait_url() { # ждать HTTP 200; $2 — таймаут в секундах, $
 
 usage() {
     sed -n '2,30p' "$0" 2>/dev/null || true
-    echo "Использование: setup-3xui.sh [-d домен] [-c имя-клиента] [-y] [-w]"
+    echo "Использование: setup-3xui.sh [-d домен] [-c имя-клиента] [-y] [-w] [-t ws|xhttp]"
     echo "  -d домен        подставной домен (A-запись → IP сервера)"
     echo "  -c имя          имя клиента/подключения (по умолчанию main)"
     echo "  -y              не задавать вопросов"
     echo "  -w              не устанавливать блокировку торрентов"
+    echo "  -t транспорт    xhttp (по умолчанию) или ws (легаси)"
     exit 1
 }
 
@@ -164,15 +170,17 @@ usage() {
 # Аргументы и проверки окружения
 #-------------------------------------------------------------------------------
 
-while getopts ":d:c:yw" o; do
+while getopts ":d:c:ywt:" o; do
     case "$o" in
         d) DOMAIN=$OPTARG ;;
         c) CLIENT_NAME=$OPTARG ;;
         y) ASSUME_YES=1 ;;
         w) DO_FIREWALL=0 ;;
+        t) TRANSPORT=$OPTARG ;;
         *) usage ;;
     esac
 done
+case "$TRANSPORT" in xhttp|ws) ;; *) die "неизвестный транспорт '-t $TRANSPORT' (доступны: xhttp, ws)" ;; esac
 
 [ "$(id -u)" -eq 0 ] || die "Запустите от root (sudo -i)"
 . /etc/os-release 2>/dev/null || true
@@ -425,20 +433,30 @@ EOF
 chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
 
 #-------------------------------------------------------------------------------
-# Инбаунд VLESS+WS через API (xray слушает 127.0.0.1, TLS терминирует nginx)
+# Инбаунд VLESS (xhttp|ws) через API (xray слушает 127.0.0.1, TLS терминирует nginx)
 #-------------------------------------------------------------------------------
 
 INBOUND_PORT=$(rnd_free_port)
 WS_PATH="/$(rnd 10)"
 UUID=$(cat /proc/sys/kernel/random/uuid)
+XFF_MARKER_VAL=$(rnd 24)
 
-log "Создание подключения VLESS+WS через API: 127.0.0.1:$INBOUND_PORT, путь $WS_PATH, клиент '$CLIENT_NAME'"
+log "Создание подключения VLESS+$TRANSPORT через API: 127.0.0.1:$INBOUND_PORT, путь $WS_PATH, клиент '$CLIENT_NAME'"
 # subId нужен панели для генерации ссылок/QR клиента (без него — «у этого клиента нет subId»)
 VLESS_SETTINGS=$(jq -nc --arg id "$UUID" --arg email "$CLIENT_NAME" --arg sub "$(rnd 16)" \
     '{clients:[{id:$id, flow:"", email:$email, subId:$sub, enable:true}], decryption:"none"}')
-# headers.Host попадает в генерируемую панелью ссылку (host=домен)
-VLESS_STREAM=$(jq -nc --arg p "$WS_PATH" --arg dom "$DOMAIN" \
-    '{network:"ws", security:"none", wsSettings:{path:$p, headers:{Host:$dom}}}')
+# host — нативное поле (не headers.Host: тот формат deprecated в xray);
+# sockopt.trustedXForwardedFor — имена заголовков-маркеров, при наличии которых
+# xray доверяет X-Forwarded-For (маркер X-Real-Source ставит только nginx)
+if [ "$TRANSPORT" = "xhttp" ]; then
+    VLESS_STREAM=$(jq -nc --arg p "$WS_PATH" --arg dom "$DOMAIN" \
+        '{network:"xhttp", security:"none", xhttpSettings:{path:$p, host:$dom, mode:"auto"},
+          sockopt:{trustedXForwardedFor:["X-Real-Source"]}}')
+else
+    VLESS_STREAM=$(jq -nc --arg p "$WS_PATH" --arg dom "$DOMAIN" \
+        '{network:"ws", security:"none", wsSettings:{path:$p, host:$dom},
+          sockopt:{trustedXForwardedFor:["X-Real-Source"]}}')
+fi
 VLESS_SNIFF=$(jq -nc '{enabled:true, destOverride:["http","tls"]}')
 
 ADD_RES=$(panel_curl -X POST \
@@ -474,6 +492,51 @@ GEN_LINK=$(panel_curl "$API_BASE/panel/api/inbounds/allLinks" | jq -r '.obj[0] /
 #-------------------------------------------------------------------------------
 
 log "nginx: финальный конфиг (TLS, без HSTS)"
+# локейшн подключения зависит от транспорта:
+#  xhttp ходит по /путь/<uuid-сессии>/<seq> → префиксный location, без Upgrade,
+#  buffering выкл в обе стороны; ws → точный location + websocket-guard (из инструкции).
+# X-Forwarded-For перезаписываем (не append — иначе клиент подделает первую запись),
+# X-Real-Source — секретный маркер: только nginx его ставит, xray по нему доверяет XFF.
+if [ "$TRANSPORT" = "xhttp" ]; then
+    VLESS_LOCATION=$(cat <<EOF
+    # --- VLESS+xhttp → xray (префикс: запросы вида ${WS_PATH}/<сессия>/<seq>) ---
+    location ${WS_PATH} {
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:${INBOUND_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header X-Real-Source ${XFF_MARKER_VAL};
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 7d;
+        proxy_send_timeout 7d;
+    }
+EOF
+)
+else
+    VLESS_LOCATION=$(cat <<EOF
+    # --- VLESS+WS → xray (не-websocket запросы получают 404) ---
+    location = ${WS_PATH} {
+        if (\$http_upgrade != "websocket") { return 404; }
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:${INBOUND_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header X-Real-Source ${XFF_MARKER_VAL};
+        proxy_read_timeout 7d;
+        proxy_send_timeout 7d;
+    }
+EOF
+)
+fi
+
 cat > "$NGINX_CONF" <<EOF
 # Сгенерировано setup-3xui.sh: подставной сайт + панель 3x-ui + VLESS(WS) за одним 443
 # nginx слушает ТОЛЬКО на IP домена — сертификат не светится на остальных IP сервера.
@@ -517,20 +580,7 @@ server {
         proxy_read_timeout 600s;
     }
 
-    # --- VLESS+WebSocket → xray (по инструкции: не-websocket запросы получают 404) ---
-    location = ${WS_PATH} {
-        if (\$http_upgrade != "websocket") { return 404; }
-        proxy_redirect off;
-        proxy_pass http://127.0.0.1:${INBOUND_PORT};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_read_timeout 7d;
-        proxy_send_timeout 7d;
-    }
+${VLESS_LOCATION}
 
     # всем остальным — сайт-заглушка
     location / { try_files \$uri \$uri/ =404; }
@@ -632,7 +682,10 @@ echo "$PANEL_HEADERS" | grep -qi 'strict-transport-security' \
     && die "в ответах панели обнаружен HSTS — проверьте XUI_SKIP_HSTS и proxy_hide_header"
 
 CODE=$(curl -s -o /dev/null -w '%{http_code}' --resolve "$RESOLVE_ARG" "https://${DOMAIN}${WS_PATH}")
-[ "$CODE" = "404" ] || warn "WS-путь без websocket отдал HTTP $CODE (ожидался 404)"
+case "$CODE" in
+    400|404) ;; # путь отвечает, но не пускает без клиентского рукопожатия — норма
+    *) warn "путь $WS_PATH отдал HTTP $CODE (ожидался 400/404)" ;;
+esac
 
 certbot renew --dry-run >/dev/null 2>&1 \
     || warn "certbot renew --dry-run не прошёл — проверьте /var/log/letsencrypt/letsencrypt.log"
@@ -643,7 +696,11 @@ certbot renew --dry-run >/dev/null 2>&1 \
 
 ENC_WS=$(printf '%s' "$WS_PATH" | jq -sRr @uri)
 ENC_NAME=$(printf '%s' "$CLIENT_NAME" | jq -sRr @uri)
-VLESS_URL="vless://${UUID}@${DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&fp=chrome&type=ws&host=${DOMAIN}&path=${ENC_WS}#${ENC_NAME}"
+if [ "$TRANSPORT" = "xhttp" ]; then
+    VLESS_URL="vless://${UUID}@${DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&fp=chrome&type=xhttp&mode=auto&host=${DOMAIN}&path=${ENC_WS}#${ENC_NAME}"
+else
+    VLESS_URL="vless://${UUID}@${DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&fp=chrome&type=ws&host=${DOMAIN}&path=${ENC_WS}#${ENC_NAME}"
+fi
 PANEL_URL="https://${DOMAIN}${WEB_PATH}"
 
 {
@@ -659,7 +716,8 @@ PANEL_URL="https://${DOMAIN}${WEB_PATH}"
     echo "Подключение VLESS:  $CLIENT_NAME"
     echo "Ссылка:             $VLESS_URL"
     echo "UUID:               $UUID"
-    echo "WS-путь:            $WS_PATH"
+    echo "Транспорт:          $TRANSPORT$( [ "$TRANSPORT" = "xhttp" ] && echo ' (mode=auto)' )"
+    echo "Путь:               $WS_PATH"
     echo "Инбаунд:            127.0.0.1:$INBOUND_PORT (проксируется nginx :443)"
     echo "-------------------------------------------------------------------"
     echo "Файлы: nginx: $NGINX_CONF; БД панели: /etc/x-ui/x-ui.db (бэкап!)"
@@ -694,6 +752,8 @@ if [ "$DOMAIN_IP" = "$PRIMARY_IP" ] && [ -n "$SECONDARY_IPS" ]; then
     echo
 fi
 echo -e " Доступы сохранены в ${C_Y}${ACCESS_FILE}${C_N} (chmod 600)."
+echo -e " Транспорт VLESS: ${TRANSPORT}$( [ "$TRANSPORT" = "xhttp" ] && echo ' (mode=auto)' ); реальные IP клиентов"
+echo -e " пробрасываются nginx'ом (X-Forwarded-For + секретный маркер X-Real-Source)."
 echo -e " HSTS выключен (nginx: не включён, 3x-ui: XUI_SKIP_HSTS=1), сервер подписок отключен,"
 echo -e " панель и xray слушают только 127.0.0.1, наружу — один порт 443 с заглушкой."
 echo -e " Блокировка торрентов: $TORR_FW_STATUS."
