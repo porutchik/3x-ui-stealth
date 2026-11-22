@@ -96,7 +96,17 @@ confirm() { # confirm "Вопрос" → 0 если y/да, иначе 1 (деф
     [[ "${ans,,}" == y || "${ans,,}" == "да" ]]
 }
 
-resolve4() { getent ahostsv4 "$1" 2>/dev/null | awk '{print $1; exit}'; }
+resolve4() { # резолв ТОЛЬКО по внешнему DNS (dig), минуя /etc/hosts и локальный стаб:
+    local d=$1 a="" ns #  # локальная связка в hosts не должна подменять A-запись
+    if command -v dig >/dev/null 2>&1; then
+        for ns in 1.1.1.1 8.8.8.8; do
+            a=$(dig +short +time=2 +tries=1 "@$ns" "$d" A 2>/dev/null \
+                | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' | head -n1)
+            [ -n "$a" ] && { printf '%s' "$a"; return 0; }
+        done
+    fi
+    getent ahostsv4 "$d" 2>/dev/null | awk '{print $1; exit}' # деградация без dig
+}
 
 # Убрать из /etc/hosts связку имя→IP: образы VPS часто прописывают там основной
 # IP под hostname/доменом, из-за чего getent ложно резолвит домен в него вместо
@@ -174,11 +184,25 @@ info "IP сервера: $(echo "$SERVER_IPS" | tr '\n' ' ')"
 info "Основной IP: $PRIMARY_IP${SECONDARY_IPS:+; вторичный(е): $SECONDARY_IPS}"
 
 #-------------------------------------------------------------------------------
+# Зависимости (ставим до выбора домена: нужна dnsutils/dig для честного резолва)
+#-------------------------------------------------------------------------------
+
+log "Установка пакетов: nginx, certbot, dig (dnsutils), jq, qrencode, sqlite3, unzip"
+export DEBIAN_FRONTEND=noninteractive
+# DPkg::Lock::Timeout — ждать до 5 минут, если apt/dpkg занят (напр., unattended-upgrades)
+APT_OPTS="-o DPkg::Lock::Timeout=300"
+apt-get $APT_OPTS update -qq
+apt-get $APT_OPTS install -y -qq nginx certbot python3-certbot-nginx curl unzip jq qrencode sqlite3 dnsutils \
+    >/root/setup-apt.log 2>&1 \
+    || { tail -n 20 /root/setup-apt.log >&2; die "apt-get install не удался (лог: /root/setup-apt.log)"; }
+
+#-------------------------------------------------------------------------------
 # Выбор подставного домена
 #-------------------------------------------------------------------------------
 
 # если hostname сервера уже резолвится в один из его IP — предложить его
-# (/etc/hosts здесь НЕ трогаем: домен ещё не выбран — почистим после выбора)
+# (проверка — по DNS через dig, локальная /etc/hosts-запись на неё не влияет;
+#  сам /etc/hosts не трогаем, пока домен не выбран)
 HN=$(hostname -f 2>/dev/null || true)
 DEFAULT_DOMAIN=""
 if [ -n "$HN" ]; then
@@ -230,19 +254,6 @@ if [ "$DOMAIN_IP" = "$PRIMARY_IP" ]; then
             || die "Отмена. Смените A-запись домена на вторичный IP и запустите скрипт снова."
     fi
 fi
-
-#-------------------------------------------------------------------------------
-# Зависимости
-#-------------------------------------------------------------------------------
-
-log "Установка пакетов: nginx, certbot, jq, qrencode, sqlite3, unzip"
-export DEBIAN_FRONTEND=noninteractive
-# DPkg::Lock::Timeout — ждать до 5 минут, если apt/dpkg занят (напр., unattended-upgrades)
-APT_OPTS="-o DPkg::Lock::Timeout=300"
-apt-get $APT_OPTS update -qq
-apt-get $APT_OPTS install -y -qq nginx certbot python3-certbot-nginx curl unzip jq qrencode sqlite3 \
-    >/root/setup-apt.log 2>&1 \
-    || { tail -n 20 /root/setup-apt.log >&2; die "apt-get install не удался (лог: /root/setup-apt.log)"; }
 
 #-------------------------------------------------------------------------------
 # Сайт-заглушка (шаблон Aerial, как в руководстве)
