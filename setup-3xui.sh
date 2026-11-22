@@ -101,11 +101,12 @@ resolve4() { # резолв ТОЛЬКО по внешнему DNS (dig), мин
     if command -v dig >/dev/null 2>&1; then
         for ns in 1.1.1.1 8.8.8.8; do
             a=$(dig +short +time=2 +tries=1 "@$ns" "$d" A 2>/dev/null \
-                | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' | head -n1)
+                | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' | head -n1 || true)
             [ -n "$a" ] && { printf '%s' "$a"; return 0; }
         done
     fi
-    getent ahostsv4 "$d" 2>/dev/null | awk '{print $1; exit}' # деградация без dig
+    getent ahostsv4 "$d" 2>/dev/null | awk '{print $1; exit}' || true # деградация без dig
+    return 0
 }
 
 # Убрать из /etc/hosts связку имя→IP: образы VPS часто прописывают там основной
@@ -186,6 +187,29 @@ info "Основной IP: $PRIMARY_IP${SECONDARY_IPS:+; вторичный(е):
 #-------------------------------------------------------------------------------
 # Зависимости (ставим до выбора домена: нужна dnsutils/dig для честного резолва)
 #-------------------------------------------------------------------------------
+
+# unattended-upgrades держит dpkg-лок: пока он работает, не поставится ни один
+# пакет. Ждём его завершения явно (штатный хелпер unattended-upgrade-shutdown,
+# висящий в системе постоянно, лок НЕ держит — паттерн его отсекает).
+# apt-таймаут ниже остаётся страховкой от прочих держателей лока.
+wait_unattended_upgrades() {
+    local waited=0
+    while pgrep -f 'unattended-upgrade($| )' >/dev/null 2>&1; do
+        if [ "$waited" = 0 ]; then
+            log "Работает unattended-upgrades — жду завершения (пока он держит лок apt, пакеты не ставятся)"
+        fi
+        if [ "$waited" -ge 600 ]; then
+            die "unattended-upgrades не завершился за 10 минут. Запустите скрипт позже либо остановите его: systemctl stop unattended-upgrades.service"
+        fi
+        sleep 10
+        waited=$((waited + 10))
+    done
+    if [ "$waited" -gt 0 ]; then
+        log "unattended-upgrades завершился (ждали ${waited} с) — продолжаю"
+    fi
+    return 0
+}
+wait_unattended_upgrades
 
 log "Установка пакетов: nginx, certbot, dig (dnsutils), jq, qrencode, sqlite3, unzip"
 export DEBIAN_FRONTEND=noninteractive
@@ -296,7 +320,7 @@ XUI_NONINTERACTIVE=1 XUI_DB_TYPE=sqlite XUI_SSL_MODE=none XUI_ENABLE_FAIL2BAN=fa
     }
 
 # креды перечитываем из результата установки — источник истины
-getenv() { grep "^$1=" /etc/x-ui/install-result.env 2>/dev/null | head -n1 | cut -d= -f2-; }
+getenv() { grep "^$1=" /etc/x-ui/install-result.env 2>/dev/null | head -n1 | cut -d= -f2- || true; }
 PANEL_USER=$(getenv XUI_USERNAME)
 PANEL_PASS=$(getenv XUI_PASSWORD)
 PANEL_PORT=$(getenv XUI_PANEL_PORT)
@@ -425,7 +449,7 @@ sleep 2
 ss -tln | grep -q "127\.0\.0\.1:${INBOUND_PORT}" || warn "xray не слушает 127.0.0.1:$INBOUND_PORT — проверьте инбаунд в панели"
 
 # панель должна генерировать ссылку с TLS/SNI домена (а не голый инбаунд)
-GEN_LINK=$(panel_curl "$API_BASE/panel/api/inbounds/allLinks" | jq -r '.obj[0] // empty')
+GEN_LINK=$(panel_curl "$API_BASE/panel/api/inbounds/allLinks" | jq -r '.obj[0] // empty' || true)
 [ -n "$GEN_LINK" ] && echo "$GEN_LINK" | grep -q "sni=${DOMAIN}" \
     || warn "панель генерирует ссылку без TLS-хоста — проверьте раздел «Хосты» в панели"
 
