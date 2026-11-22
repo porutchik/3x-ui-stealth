@@ -191,7 +191,9 @@ SERVER_IPS=$(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1)
 [ -n "$SERVER_IPS" ] || die "на сервере нет глобальных IPv4-адресов"
 PRIMARY_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
 [ -n "$PRIMARY_IP" ] || PRIMARY_IP=$(echo "$SERVER_IPS" | head -n1)
-SECONDARY_IPS=$(echo "$SERVER_IPS" | grep -vx "$PRIMARY_IP" | tr '\n' ' ')
+# || true обязателен: при единственном IP сервера grep -vx не находит строк и
+# возвращает 1 — без этого set -e падает сразу здесь
+SECONDARY_IPS=$(echo "$SERVER_IPS" | grep -vx "$PRIMARY_IP" | tr '\n' ' ' || true)
 
 info "IP сервера: $(echo "$SERVER_IPS" | tr '\n' ' ')"
 info "Основной IP: $PRIMARY_IP${SECONDARY_IPS:+; вторичный(е): $SECONDARY_IPS}"
@@ -284,6 +286,8 @@ if [ "$DOMAIN_IP" = "$PRIMARY_IP" ]; then
     if [ -n "$SECONDARY_IPS" ]; then
         warn "Рекомендуется сменить A-запись на вторичный IP:$SECONDARY_IPS"
         warn "основной IP VPS обычно уже известен блокировщикам/сканерам, вторичный — нет."
+    else
+        info "Это единственный IP сервера — перевести домен на вторичный нет возможности."
     fi
     if [ "$ASSUME_YES" != 1 ]; then
         confirm "Продолжить с $DOMAIN → $DOMAIN_IP?" \
