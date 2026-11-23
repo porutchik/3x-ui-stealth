@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0082c9">
+<title>Sign in - CloudDrive</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="login-page">
+
+<header class="topbar">
+  <a class="brand" href="index.html">
+    <svg class="logo" viewBox="0 0 64 40" aria-hidden="true"><path d="M14 34a10 10 0 0 1-1.6-19.9 14 14 0 0 1 27-4.3A11 11 0 0 1 50 34Z" fill="#fff"/></svg>
+    <span>CloudDrive</span>
+  </a>
+</header>
+
+<main class="login-wrap">
+  <form class="login-card" method="post" action="index.php" autocomplete="on">
+    <h1>Sign in</h1>
+    <p class="sub">Access your files from any device</p>
+    <label for="user">Username</label>
+    <input id="user" name="user" type="text" inputmode="email" autocapitalize="none" spellcheck="false" autofocus required>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" required>
+    <button type="submit">Log in</button>
+    <p class="hint">Forgot your password? Contact your administrator.</p>
+  </form>
+</main>
+
+<footer class="foot">
+  <span>CloudDrive Server 10.11.0</span>
+  <a href="index.html">Dashboard</a>
+  <a href="index.html">Help</a>
+</footer>
+
+</body>
+</html>
