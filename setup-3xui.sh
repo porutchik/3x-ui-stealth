@@ -424,6 +424,36 @@ BAD_LISTENERS=$(ss -tlnp | grep '"x-ui"' | grep -v '127\.0\.0\.1:' || true)
 [ -z "$BAD_LISTENERS" ] || die "панель слушает не только localhost: $BAD_LISTENERS"
 
 #-------------------------------------------------------------------------------
+# BBR — эквивалент п.26 меню x-ui (enable_bbr): /etc/sysctl.d/99-bbr-x-ui.conf
+# с бэкапом прежних значений первой строкой (штатный Disable BBR его читает)
+#-------------------------------------------------------------------------------
+
+if [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)" = "bbr" ] \
+   && { [ "$(sysctl -n net.core.default_qdisc 2>/dev/null || true)" = "fq" ] \
+        || [ "$(sysctl -n net.core.default_qdisc 2>/dev/null || true)" = "cake" ]; }; then
+    info "BBR уже включён — пропускаю"
+else
+    log "Включение BBR (эквивалент п.26 меню x-ui)"
+    {
+        echo "#$(sysctl -n net.core.default_qdisc):$(sysctl -n net.ipv4.tcp_congestion_control)"
+        echo "net.core.default_qdisc = fq"
+        echo "net.ipv4.tcp_congestion_control = bbr"
+    } > /etc/sysctl.d/99-bbr-x-ui.conf
+    # гасим возможные дубли в основном sysctl.conf (как делает x-ui)
+    if [ -f /etc/sysctl.conf ]; then
+        sed -i 's/^net.core.default_qdisc/# &/' /etc/sysctl.conf
+        sed -i 's/^net.ipv4.tcp_congestion_control/# &/' /etc/sysctl.conf
+    fi
+    # применяем только наш файл (sysctl --system поднимал бы шум чужих default'ов)
+    sysctl -p /etc/sysctl.d/99-bbr-x-ui.conf >/dev/null 2>&1 || true
+    if [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)" = "bbr" ]; then
+        log "BBR включён (qdisc=$(sysctl -n net.core.default_qdisc))"
+    else
+        warn "Не удалось включить BBR — проверьте поддержку ядром (нужно >= 4.9, сейчас $(uname -r))"
+    fi
+fi
+
+#-------------------------------------------------------------------------------
 # nginx (HTTP) + сертификат Let's Encrypt
 #-------------------------------------------------------------------------------
 
