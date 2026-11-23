@@ -32,7 +32,7 @@ set -Eeuo pipefail
 export LANG=C.UTF-8 LC_ALL=C.UTF-8
 
 XUI_INSTALL_URL="https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh"
-DECOY_TEMPLATE_URL="https://html5up.net/aerial/download"
+DECOY_ZIP_URL="https://raw.githubusercontent.com/porutchik/3x-ui-stealth/main/decoy.zip"
 SELFSTEAL_DIR="/var/www/selfsteal"
 NGINX_CONF="/etc/nginx/conf.d/selfsteal.conf"
 ACCESS_FILE="/root/3x-ui-access.txt"
@@ -81,6 +81,22 @@ rnd_lower() {
         out+="$(head -c 512 /dev/urandom | LC_ALL=C tr -dc 'a-z' || true)"
     done
     printf '%.*s' "$n" "$out"
+}
+
+# лёгкая рандомизация заглушки: в конец index.html и style.css дописывается
+# случайный комментарий — у каждого инстанса чуть другой размер HTML/CSS
+vary_decoy() {
+    local f n com
+    for f in "$SELFSTEAL_DIR/index.html" "$SELFSTEAL_DIR/style.css"; do
+        [ -f "$f" ] || continue
+        n=$(( (RANDOM % 40) + 12 ))
+        com=$(head -c 128 /dev/urandom | LC_ALL=C tr -dc 'a-zA-Z0-9' | head -c "$n" || true)
+        if [ "${f##*.}" = "css" ]; then
+            printf '/* %s */\n' "$com" >> "$f"
+        else
+            printf '<!-- %s -->\n' "$com" >> "$f"
+        fi
+    done
 }
 
 # read с /dev/tty: при `curl ... | bash` stdin занят самим скриптом
@@ -242,12 +258,13 @@ wait_unattended_upgrades() {
 }
 wait_unattended_upgrades
 
-log "Установка пакетов: nginx, certbot, dig (dnsutils), jq, qrencode, sqlite3, unzip"
+log "Установка пакетов: nginx, certbot, dig (dnsutils), jq, qrencode, sqlite3, unzip, iftop, mtr-tiny, ifstat"
 export DEBIAN_FRONTEND=noninteractive
 # DPkg::Lock::Timeout — ждать до 5 минут, если apt/dpkg занят (напр., unattended-upgrades)
 APT_OPTS="-o DPkg::Lock::Timeout=300"
 apt-get $APT_OPTS update -qq
 apt-get $APT_OPTS install -y -qq nginx certbot python3-certbot-nginx curl unzip jq qrencode sqlite3 dnsutils \
+    iftop mtr-tiny ifstat \
     >/root/setup-apt.log 2>&1 \
     || { tail -n 20 /root/setup-apt.log >&2; die "apt-get install не удался (лог: /root/setup-apt.log)"; }
 
@@ -313,17 +330,19 @@ if [ "$DOMAIN_IP" = "$PRIMARY_IP" ]; then
 fi
 
 #-------------------------------------------------------------------------------
-# Сайт-заглушка (шаблон Aerial, как в руководстве)
+# Сайт-заглушка (ownCloud-стиль, архив из репозитория скрипта)
 #-------------------------------------------------------------------------------
 
 log "Сайт-заглушка: $SELFSTEAL_DIR"
 mkdir -p "$SELFSTEAL_DIR"
-if curl -fL --retry 3 -o /tmp/selfsteal-aerial.zip "$DECOY_TEMPLATE_URL" >/root/selfsteal-dl.log 2>&1 \
-   && unzip -oq /tmp/selfsteal-aerial.zip -d "$SELFSTEAL_DIR" 2>>/root/selfsteal-dl.log \
+if curl -fL --retry 3 -o /tmp/decoy.zip "$DECOY_ZIP_URL" >/root/selfsteal-dl.log 2>&1 \
+   && unzip -oq /tmp/decoy.zip -d "$SELFSTEAL_DIR" 2>>/root/selfsteal-dl.log \
    && [ -f "$SELFSTEAL_DIR/index.html" ]; then
-    log "Шаблон Aerial распакован"
+    log "Заглушка распакована из репозитория"
+    vary_decoy
+    info "Содержимое рандомизировано — размер HTML/CSS уникален для этого инстанса"
 else
-    warn "Не удалось скачать шаблон Aerial — использую минимальную заглушку"
+    warn "Не удалось скачать заглушку ($DECOY_ZIP_URL) — использую минимальную страницу"
     cat > "$SELFSTEAL_DIR/index.html" <<'EOF'
 <!DOCTYPE html>
 <html lang="en">
@@ -332,6 +351,10 @@ else
 </html>
 EOF
 fi
+
+# X-Powered-By заглушки — правдоподобная версия PHP, случайная при каждой установке
+PHPVER=$(printf '%s\n' 7.4.33 8.0.30 8.1.31 8.2.28 8.3.16 8.4.3 | shuf -n1)
+info "Заглушка отдаёт X-Powered-By: PHP/$PHPVER"
 
 #-------------------------------------------------------------------------------
 # Установка 3x-ui (неинтерактивно, SQLite, без SSL — TLS терминирует nginx)
@@ -601,8 +624,12 @@ server {
 
 ${VLESS_LOCATION}
 
-    # всем остальным — сайт-заглушка
-    location / { try_files \$uri \$uri/ =404; }
+    # всем остальным — сайт-заглушка (версия PHP в заголовке — случайная,
+    # генерируется при каждой установке; только тут, не на прокси-локейшнах)
+    location / {
+        add_header X-Powered-By "PHP/${PHPVER}" always;
+        try_files \$uri \$uri/ =404;
+    }
 }
 EOF
 nginx -t 2>/dev/null || { nginx -t; die "nginx -t после финального конфига"; }
@@ -743,6 +770,7 @@ PANEL_URL="https://${DOMAIN}${WEB_PATH}"
     echo "Сертификат: /etc/letsencrypt/live/$DOMAIN/ (продление: certbot renew"
     echo "             по таймеру certbot.timer, хук перезагружает nginx)"
     echo "Блокировка торрентов: $TORR_FW_STATUS"
+    echo "Заглушка: CloudDrive (ownCloud-стиль), X-Powered-By: PHP/$PHPVER"
     echo "==================================================================="
 } | tee "$ACCESS_FILE" >/dev/null
 chmod 600 "$ACCESS_FILE"
@@ -775,5 +803,6 @@ echo -e " Транспорт VLESS: ${TRANSPORT}$( [ "$TRANSPORT" = "xhttp" ] &&
 echo -e " пробрасываются nginx'ом (X-Forwarded-For + секретный маркер X-Real-Source)."
 echo -e " HSTS выключен (nginx: не включён, 3x-ui: XUI_SKIP_HSTS=1), сервер подписок отключен,"
 echo -e " панель и xray слушают только 127.0.0.1, наружу — один порт 443 с заглушкой."
+echo -e " Заглушка CloudDrive отдаёт X-Powered-By: PHP/$PHPVER (рандомизируется при каждой установке)."
 echo -e " Блокировка торрентов: $TORR_FW_STATUS."
 echo
